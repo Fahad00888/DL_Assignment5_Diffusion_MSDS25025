@@ -230,3 +230,45 @@ def train(model, dataloader, epochs=300, lr=2e-4, loss_type="l2", log_every=20):
             avg = epoch_loss / len(dataloader)
             print(f"Epoch {epoch+1:4d}/{epochs}  avg_loss={avg:.4f}")
     return losses
+
+
+# ----------------------------- Step 6: Sampling (reverse process) -----------------------------
+@torch.no_grad()
+def sample(model, n=4, img_size=IMG_SIZE, save_every=None):
+    """
+    Reverse diffusion: start from pure noise x_T ~ N(0, I) and denoise to x_0.
+    DDPM ancestral sampling using the noise-prediction parameterization.
+    Args:
+        model:      trained U-Net
+        n:          number of images to generate
+        save_every: if set, store intermediate x at every `save_every` steps (for the
+                    noise->image progression figure)
+    Returns:
+        x:      (n, 3, H, W) generated images in [-1, 1]
+        frames: list of intermediate tensors (empty if save_every is None)
+    """
+    model.eval()
+    x = torch.randn(n, 3, img_size, img_size, device=device)   # x_T
+    frames = []
+    for i in reversed(range(T)):                               # T-1 ... 0
+        t = torch.full((n,), i, device=device, dtype=torch.long)
+        eps = model(x, t)                                      # predicted noise
+
+        alpha = alphas[i]
+        acp = alphas_cumprod[i]
+        beta = betas[i]
+
+        # mean of p_theta(x_{t-1} | x_t)
+        coef = beta / torch.sqrt(1.0 - acp)
+        mean = (1.0 / torch.sqrt(alpha)) * (x - coef * eps)
+
+        if i > 0:
+            noise = torch.randn_like(x)
+            x = mean + torch.sqrt(beta) * noise                # add stochastic term
+        else:
+            x = mean                                           # last step: no noise
+
+        if save_every is not None and i % save_every == 0:
+            frames.append(x.clamp(-1, 1).cpu())
+
+    return x.clamp(-1, 1), frames
