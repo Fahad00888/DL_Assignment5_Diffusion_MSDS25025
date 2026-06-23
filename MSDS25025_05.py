@@ -88,3 +88,87 @@ def forward_diffusion(x0, t, noise=None):
     s2 = sqrt_one_minus_acp[t].view(-1, 1, 1, 1)
     x_t = s1 * x0 + s2 * noise
     return x_t, noise
+
+
+# ----------------------------- Step 3: Denoising U-Net -----------------------------
+class TimeEmbedding(nn.Module):
+    """Sinusoidal timestep embedding -> small MLP. Lets ONE network handle all T noise levels."""
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+        )
+
+    def forward(self, t):
+        half = self.dim // 2
+        freqs = torch.exp(
+            -math.log(10000) * torch.arange(half, device=t.device).float() / half
+        )
+        args = t[:, None].float() * freqs[None]
+        emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+        return self.mlp(emb)
+
+
+class ResidualBlock(nn.Module):
+    """Conv -> GroupNorm -> SiLU, with timestep injection and a residual skip."""
+    def __init__(self, in_ch, out_ch, t_dim):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
+        self.norm1 = nn.GroupNorm(8, out_ch)
+        self.norm2 = nn.GroupNorm(8, out_ch)
+        self.time_proj = nn.Linear(t_dim, out_ch)
+        self.res = nn.Conv2d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x, t_emb):
+        h = F.silu(self.norm1(self.conv1(x)))
+        h = h + self.time_proj(t_emb)[:, :, None, None]      # inject timestep
+        h = F.silu(self.norm2(self.conv2(h)))
+        return h + self.res(x)                               # residual connection
+
+
+class UNet(nn.Module):
+    """
+    Small U-Net for noise prediction. Input: (x_t, t) -> Output: predicted noise (same shape as x_t).
+    2 resolution levels (32x32 -> 16x16 -> bottleneck -> 16x16 -> 32x32) with skip connections.
+    """
+    def __init__(self, in_ch=3, base_ch=64, t_dim=128):
+        super().__init__()
+        self.time = TimeEmbedding(t_dim)
+
+        # input projection
+        self.in_conv = nn.Conv2d(in_ch, base_ch, kernel_size=3, padding=1)
+
+        # down path
+        self.down1 = ResidualBlock(base_ch, base_ch, t_dim)
+        self.down2 = ResidualBlock(base_ch, base_ch * 2, t_dim)
+        self.pool = nn.AvgPool2d(2)                              # 32 -> 16
+
+        # bottleneck
+        self.mid = ResidualBlock(base_ch * 2, base_ch * 2, t_dim)
+
+        # up path (channels include the concatenated skips)
+        self.up = nn.Upsample(scale_factor=2, mode="nearest")    # 16 -> 32
+        self.up1 = ResidualBlock(base_ch * 2 + base_ch * 2, base_ch, t_dim)
+        self.up2 = ResidualBlock(base_ch + base_ch, base_ch, t_dim)
+
+        # output projection: NO activation (predicted noise is unbounded)
+        self.out_conv = nn.Conv2d(base_ch, in_ch, kernel_size=1)
+
+    def forward(self, x, t):
+        t_emb = self.time(t)
+
+        x0 = self.in_conv(x)                 # (B, base, 32, 32)
+        d1 = self.down1(x0, t_emb)           # (B, base, 32, 32)   -> skip
+        d2 = self.down2(self.pool(d1), t_emb)  # (B, 2*base, 16, 16) -> skip
+
+        m = self.mid(d2, t_emb)              # (B, 2*base, 16, 16)
+
+        u = self.up1(torch.cat([m, d2], dim=1), t_emb)        # concat skip d2
+        u = self.up(u)                                        # 16 -> 32
+        u = self.up2(torch.cat([u, d1], dim=1), t_emb)        # concat skip d1
+
+        return self.out_conv(u)              # (B, 3, 32, 32) predicted noise
