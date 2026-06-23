@@ -51,3 +51,40 @@ class AnimalDataset(Dataset):
     def __getitem__(self, idx):
         img = Image.open(self.paths[idx]).convert("RGB")
         return self.tf(img)
+
+
+# ----------------------------- Step 2: Forward (noising) process -----------------------------
+# Precompute the noise schedule ONCE (linear beta schedule, the DDPM standard).
+betas = torch.linspace(1e-4, 0.02, T)                    # (T,)
+alphas = 1.0 - betas
+alphas_cumprod = torch.cumprod(alphas, dim=0)            # alpha-bar_t
+sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)         # sqrt(alpha-bar_t)
+sqrt_one_minus_acp = torch.sqrt(1.0 - alphas_cumprod)    # sqrt(1 - alpha-bar_t)
+
+# move schedule tensors to device
+betas = betas.to(device)
+alphas = alphas.to(device)
+alphas_cumprod = alphas_cumprod.to(device)
+sqrt_alphas_cumprod = sqrt_alphas_cumprod.to(device)
+sqrt_one_minus_acp = sqrt_one_minus_acp.to(device)
+
+
+def forward_diffusion(x0, t, noise=None):
+    """
+    Closed-form forward process (reparameterization trick), NOT iterative addition.
+    x_t = sqrt(alpha-bar_t) * x0 + sqrt(1 - alpha-bar_t) * noise
+    Args:
+        x0:    (B, C, H, W) clean images in [-1, 1]
+        t:     (B,) integer timesteps, one per image
+        noise: optional pre-sampled noise; if None, sampled from N(0, I)
+    Returns:
+        x_t:   (B, C, H, W) noised images at timestep t
+        noise: (B, C, H, W) the noise that was added (the training target)
+    """
+    if noise is None:
+        noise = torch.randn_like(x0)
+    # gather the per-timestep scalars and reshape to broadcast over (B,C,H,W)
+    s1 = sqrt_alphas_cumprod[t].view(-1, 1, 1, 1)
+    s2 = sqrt_one_minus_acp[t].view(-1, 1, 1, 1)
+    x_t = s1 * x0 + s2 * noise
+    return x_t, noise
