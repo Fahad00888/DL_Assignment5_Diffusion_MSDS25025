@@ -172,3 +172,25 @@ class UNet(nn.Module):
         u = self.up2(torch.cat([u, d1], dim=1), t_emb)        # concat skip d1
 
         return self.out_conv(u)              # (B, 3, 32, 32) predicted noise
+
+
+# ----------------------------- Step 4: Custom loss -----------------------------
+def diffusion_loss(pred_noise, true_noise, loss_type="l2"):
+    """
+    Customized loss: ||true_noise - pred_noise||.
+    Implements the Algorithm-1 objective || eps - eps_theta(...) ||^2 from scratch
+    (no nn.MSELoss / nn.L1Loss).
+    Args:
+        pred_noise: (B, C, H, W) noise predicted by the U-Net
+        true_noise: (B, C, H, W) the actual noise added in the forward process
+        loss_type:  "l2" (mean squared error) or "l1" (mean absolute error)
+    Returns:
+        scalar loss
+    """
+    diff = pred_noise - true_noise
+    if loss_type == "l2":
+        return (diff ** 2).mean()
+    elif loss_type == "l1":
+        return diff.abs().mean()
+    else:
+        raise ValueError(f"Unknown loss_type: {loss_type}")
