@@ -194,3 +194,39 @@ def diffusion_loss(pred_noise, true_noise, loss_type="l2"):
         return diff.abs().mean()
     else:
         raise ValueError(f"Unknown loss_type: {loss_type}")
+
+
+# ----------------------------- Step 5: Training loop (Algorithm 1) -----------------------------
+def train(model, dataloader, epochs=300, lr=2e-4, loss_type="l2", log_every=20):
+    """
+    Trains the DDPM noise predictor following Algorithm 1:
+      repeat:
+        x0 ~ data
+        t  ~ Uniform({1..T})
+        eps ~ N(0, I)
+        gradient step on || eps - eps_theta(sqrt(acp)*x0 + sqrt(1-acp)*eps, t) ||^2
+    Returns a list of per-step losses (for the loss curve in the report).
+    """
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    losses = []
+    model.train()
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        for x0 in dataloader:
+            x0 = x0.to(device)
+            t = torch.randint(0, T, (x0.size(0),), device=device)   # one t per image
+            x_t, noise = forward_diffusion(x0, t)                   # Step 2
+            pred = model(x_t, t)                                    # Step 3
+            loss = diffusion_loss(pred, noise, loss_type)           # Step 4
+
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+            losses.append(loss.item())
+            epoch_loss += loss.item()
+
+        if (epoch + 1) % log_every == 0 or epoch == 0:
+            avg = epoch_loss / len(dataloader)
+            print(f"Epoch {epoch+1:4d}/{epochs}  avg_loss={avg:.4f}")
+    return losses
